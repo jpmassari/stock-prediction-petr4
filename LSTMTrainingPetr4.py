@@ -1,55 +1,91 @@
-#importing the libraries
+import sys
+import os
+from itertools import chain 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
+from keras.utils import normalize
+from keras.preprocessing.text import one_hot
+from keras.utils import to_categorical #one_hot
+##pip install nvidia-cublas-cu11
 
-#importing the dataset
+#print(tf.config.list_physical_devices('GPU'))
+#importing the datase
+#os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
 dataset = pd.read_csv('PETR4Daily.csv')
-training_set = dataset.iloc[:,1:2].values
-#training_set = dataset.iloc[:,1:].values # pegar todas as colunas
+training_set = dataset.iloc[2793:2814,1:2].values #dataset.iloc (iloc não usa gpu)
 
-crudeOil = pd.read_csv('crudeOil.csv') 
-crudeOil_set = crudeOil.iloc[:,2:3].values
-
-dollar = pd.read_csv('USDollar.csv')
-dollar_set = dollar.iloc[:,2:3].values
+def make_variables(initializer):
+    return (tf.Variable(initializer(shape=[19,3], dtype=tf.float64)),
+            tf.Variable(initializer(shape=[19,3], dtype=tf.float64)),
+            tf.Variable(initializer(shape=[19,3], dtype=tf.float64)))
+X_train, y_train, X_test = make_variables(tf.zeros_initializer())
 
 #feature scaling
-from sklearn.preprocessing import MinMaxScaler
+""" from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import StandardScaler
-sc = MinMaxScaler(feature_range = (0,1))
-#sc = StandardScaler()
-training_set_scaled = sc.fit_transform(training_set)
-crudeOil_set_scaled = sc.transform(crudeOil_set) 
-dollar_set_scaled = sc.transform(dollar_set)
+sc = MinMaxScaler(feature_range = (0,1)) """
 
+training_set = tf.constant(training_set)
+training_set_scaled = tf.Variable(training_set)
 
-#creating a data structure with 60 timesteps and 1 output
-X_train = []
-y_train = []
-for i in range(230, 2761): #60, 1258
-    X_train.append(training_set_scaled[i-230:i,0])
-    y_train.append(training_set_scaled[i,0])
-X_train,y_train = np.array(X_train),np.array(y_train)
-X_train = np.reshape(X_train,(X_train.shape[0],X_train.shape[1],1))
+def difa(a,b):
+    diff = (a-b)/b
+    if(diff > 0):
+        return diff
+    else:
+        return 0
 
-X_train_crude = []
-for i in range(230,2761):
-    X_train_crude.append(crudeOil_set_scaled[i-230:i,0])
-X_train_crude = np.array(X_train_crude)
-X_train_crude = np.reshape(X_train_crude,(X_train_crude.shape[0],X_train_crude.shape[1],1))
+def normalize(p, n=10, m=100):
+    v = p
+    nm1 = (n-1)
+    v = np.round(v*m) + np.round((n-1)/2)
+    if v > nm1: 
+        return nm1
+    elif v < 0: 
+        return 0 
+    else: 
+        return v
 
-X_train_dollar = []
-for i in range(230,2761):
-    X_train_dollar.append(dollar_set_scaled[i-230:i,0])
-X_train_dollar = np.array(X_train_dollar)
-X_train_dollar = np.reshape(X_train_dollar,(X_train_dollar.shape[0],X_train_dollar.shape[1],1))
+for i in range(0, 20):
+    diff_a = difa(training_set[i,0], training_set[i+1,0])
+    p = normalize(diff_a)
+    #print(int(p))
+    training_set_scaled[i].assign(int(p))
+print("training_set_scaled: ",training_set_scaled)
 
-X_train = np.concatenate((X_train, X_train_crude, X_train_dollar), axis=2)
+for i in range(0, 19):
+    for x in range(i, i+1):
+        d1 = training_set_scaled[tf.size(y_train) - (tf.size(y_train) - x)]
+        d2 = training_set_scaled[x + 1]
+        d3 = training_set_scaled[x + 2]
+        diff1 = 0
+        diff2 = 0
+        if(d2 - d1 > 0):
+            diff1 = float(str(3) + tf.as_string(training_set_scaled[x]))
+        else:
+            diff1 = float(str(2) + tf.as_string(training_set_scaled[x]))
+        if(d2 - d3 > 0):
+            diff2 = float(str(3) + tf.as_string(training_set_scaled[x + 1]))
+        else:
+            diff2 = float(str(2) + tf.as_string(training_set_scaled[x + 1]))
+
+        y_train[x].assign([200+x, diff1, diff2])
+        X_train[x].assign([float(str(1) + tf.as_string(training_set_scaled[x])), float(str(1) + tf.as_string(training_set_scaled[x])), 100+x])
+
+X_train = tf.reshape(X_train, (X_train.shape[0]//1, 1, 3))
+y_train = tf.reshape(y_train, (y_train.shape[0]//1, 1, 3))
+
+X_train = tf.cast(X_train, dtype=tf.int32)
+y_train = tf.cast(y_train, dtype=tf.int32)
+print("y_train: ", y_train)
+print("X_train: ", X_train)
 
 #building the RNN
 from keras.models import Sequential
+from keras.losses import categorical_crossentropy
 from keras.layers import Dense
 from keras.layers import LSTM
 from keras.layers import Dropout
@@ -57,122 +93,85 @@ from keras.layers import Conv1D
 from keras.layers import Bidirectional
 from keras.layers import Flatten
 from keras.layers import CuDNNLSTM
+from sklearn import linear_model
 
 regressor = Sequential()
-""" 
-#adding the first LSTM layer and some Dropout regularisation
-regressor.add(LSTM(units = 50, return_sequences = True, input_shape = (X_train.shape[1],X_train.shape[2])))
-regressor.add(Dropout(0.2))
 
-#adding the second LSTM layer and some Dropout regularisation
-regressor.add(LSTM(units = 50, return_sequences = True))
-regressor.add(Dropout(0.2))
+#adding the first LSTM layer and some Dropout regularisation
+regressor.add(LSTM(units = 2024 , return_sequences = True, input_shape = (1,3)))
+#regressor.add(Dropout(0.2))
+""" #adding the second LSTM layer and some Dropout regularisation
+regressor.add(LSTM(units = 30, return_sequences = True))
+#regressor.add(Dropout(0.2))
 
 #adding the third LSTM layer and some Dropout regularisation
-regressor.add(LSTM(units = 50, return_sequences = True))
-regressor.add(Dropout(0.2))
+regressor.add(LSTM(units = 30, return_sequences = True))
+#regressor.add(Dropout(0.2))
 
 #adding the fourth LSTM layer and some Dropout regularisation
-regressor.add(LSTM(units = 50))
-regressor.add(Dropout(0.2))
+regressor.add(LSTM(units = 30, return_sequences = True))
+#regressor.add(Dropout(0.2))
 
+#adding the fourth LSTM layer and some Dropout regularisation
+regressor.add(LSTM(units = 30, return_sequences = True))
+#regressor.add(Dropout(0.2))
+
+#adding the fourth LSTM layer and some Dropout regularisation
+regressor.add(LSTM(units = 30, return_sequences = True))
+#regressor.add(Dropout(0.2))
+ """
 #adding the output layer
-regressor.add(Dense(units = 1))
+regressor.add(Dense(units = 3, activation='softmax')) #sigmoid
 
 #compiling the RNN
-regressor.compile(optimizer = 'adam', loss = 'mean_squared_error') """
+regressor.compile(optimizer = 'adam', loss = 'categorical_crossentropy')
 
-import random
-
-random_seed = 42
-random.seed(random_seed)
-
-regressor.add(Bidirectional(LSTM(units=256, input_shape=(X_train.shape[1], 1)))) #com 124 foi excelente.
-regressor.add(Dropout(0.2, noise_shape=None, seed=random_seed))
-regressor.add(Dense(256, input_dim=X_train.shape[1], activation='relu'))
-regressor.add(Dropout(0.2))
-regressor.add(Dense(128, activation='relu'))
-regressor.add(Dropout(0.2))
-regressor.add(Dense(64, activation='relu'))
-regressor.add(Dropout(0.2))
-regressor.add(Dense(32, activation='relu'))
-regressor.add(Dropout(0.2))
-regressor.add(Dense(16, activation='relu'))
-regressor.add(Dense(8, activation='relu'))
-regressor.add(Dense(4, activation='relu'))
-regressor.add(Dense(1, activation='sigmoid'))
-#regressor.add(Dense(units = 1))
-regressor.compile(optimizer = 'adam', loss = 'mean_squared_error')
+""" X_train = tf.one_hot(X_train, 3)
+y_train = tf.one_hot(y_train, 3)
+print("to_categorical x_train: ",X_train)
+print("to_categorical y_train: ",y_train) """
 
 tensorboard = tf.keras.callbacks.TensorBoard(log_dir='logs/')
-regressor.fit(X_train, y_train, epochs = 100, callbacks=[tensorboard])
-
+regressor.fit(X_train, y_train, epochs = 5000, batch_size=1, callbacks=[tensorboard], verbose=1) #700
+print(regressor.metrics_names)
 # evaluate the model
 scores = regressor.evaluate(X_train, y_train, verbose=0)
 print(scores*100)
 
 # Make predictions on the test set
 predictions = regressor.predict(X_train)
+print("predictions: ", predictions)
 regressor.save('lstmPetr4.h5')
 
 # Calculate the accuracy of the model
 accuracy = np.sum(predictions == y_train) / len(predictions)
 print(accuracy)
 
-#making the predictions and visualising the results
+s = 0
+for i in range(2815,2834):
+    for x in range(i, i+1):
+        X_test[i-2815].assign([float(str(1) + tf.as_string(training_set_scaled[x])), float(str(1) + tf.as_string(training_set_scaled[x + 1])), 100+s])
+        s += 1
+X_test = tf.reshape(X_test, (X_test.shape[0]//1, 1, 3))
+X_test = tf.cast(X_test, tf.int32)
+print("X_test: ",X_test)
+predicted_stock_price = regressor.predict(X_test)
+#predicted_stock_price = sc.inverse_transform(predicted_stock_price)
+print("predicted_stock_price: ",predicted_stock_price)
+
+#getting realstock price to compare prediction
 dataset_test = pd.read_csv('PETR4Train.csv')
 real_stock_price = dataset_test.iloc[:,1:2].values
+real_stock_price = tf.constant(real_stock_price)
+print("real stock price: ",real_stock_price)
+print(real_stock_price.shape)
 
-#getting the predicted stock price of 2017
-#dataset_total = pd.concat((dataset['Open'],dataset_test['Open']),axis = 0)
-#dataset_total_crude = pd.concat((crudeOil['Open'],dataset_test['Open']),axis = 0)
-#dataset_total_dollar = pd.concat((dollar['Open'],dataset_test['Open']),axis = 0)
+#real_stock_price_scaled = sc.transform(real_stock_price)
 
-dataset_total = pd.DataFrame(dataset['Open'])
-dataset_total_crude = pd.DataFrame(crudeOil['Open'])
-dataset_total_dollar = pd.DataFrame(dollar['Open'])
-
-#inputs = dataset_total[len(dataset_total) - len(dataset_test) - 120:].values #21.31 ... 22.87 ( len(dataset_test) 20 - 60 = 80 valores para treino)
-inputs = dataset_total[len(dataset_total) - len(dataset_test) - 230:].values 
-print(len(inputs))
-inputs = inputs.reshape(-1,1)
-inputs = sc.transform(inputs)
-
-
-inputs_crude = dataset_total_crude[len(dataset_total_crude) - len(dataset_test) - 230:].values
-inputs_crude = inputs_crude.reshape(-1,1)
-inputs_crude = sc.transform(inputs_crude)
-
-inputs_dollar = dataset_total_dollar[len(dataset_total_dollar) - len(dataset_test) - 230:].values
-inputs_dollar = inputs_dollar.reshape(-1,1)
-inputs_dollar = sc.transform(inputs_dollar)
-
-X_test = []
-for i in range(230,250): #80 precisa bater com a quantia de valores de treino no inputs 
-    X_test.append(inputs[i-230:i,0])
-X_test = np.array(X_test)
-X_test = np.reshape(X_test,(X_test.shape[0],X_test.shape[1],1))
-
-X_test_crude = []
-for i in range(230,250):
-    X_test_crude.append(inputs_crude[i-230:i,0])
-X_test_crude = np.array(X_test_crude)
-X_test_crude = np.reshape(X_test_crude,(X_test_crude.shape[0],X_test_crude.shape[1],1))
-
-X_test_dollar = []
-for i in range(230,250):
-    X_test_dollar.append(inputs_dollar[i-230:i,0])
-X_test_dollar = np.array(X_test_dollar)
-X_test_dollar = np.reshape(X_test_dollar,(X_test_dollar.shape[0],X_test_dollar.shape[1],1))
-
-X_test = np.concatenate((X_test, X_test_crude, X_test_dollar), axis=2)
-
-predicted_stock_price = regressor.predict(X_test)
-predicted_stock_price = sc.inverse_transform(predicted_stock_price)
 
 #visualising the results
 plt.plot(real_stock_price, color = 'red')
-plt.plot(predicted_stock_price, color = 'blue')
+plt.plot(predicted_stock_price[:,0], color = 'blue')
 plt.title('Petrobras Stock Price Prediction')
 plt.xlabel('Time')
 plt.ylabel('Google Stock Price')
@@ -180,39 +179,20 @@ plt.legend()
 plt.show()
  
 from sklearn.metrics import mean_squared_error
-mse = mean_squared_error(real_stock_price, predicted_stock_price)
+mse = mean_squared_error(real_stock_price[:19,0], predicted_stock_price)
 print(mse)
 
 #calculating the Root mean_squared_error
 from math import sqrt
-rmse = sqrt(mean_squared_error(real_stock_price, predicted_stock_price))
+rmse = sqrt(mean_squared_error(real_stock_price[:19,0], predicted_stock_price))
 print(rmse)
 
 #calculating the mean_absolute_error
 from sklearn.metrics import mean_absolute_error
-mae = mean_absolute_error(real_stock_price, predicted_stock_price)
+mae = mean_absolute_error(real_stock_price[:19,0], predicted_stock_price)
 print(mae)
 
 #calculating the R2
 from sklearn.metrics import r2_score
-r2 = r2_score(real_stock_price, predicted_stock_price)
+r2 = r2_score(real_stock_price[:19,0], predicted_stock_price)
 print(r2)
-
-""" import sqlite3  DON'T FORGET TO INSERT THE REGRESSION AS WELL WITH THE AVERAGE
-
-# connect to database
-conn = sqlite3.connect('stock_db.db')
-
-# Calculate the average of the predicted stock price and the real stock price
-average_price = (predicted_stock_price + real_stock_price)/2
-
-# Insert the average price into the database
-cursor = conn.cursor()
-cursor.execute("CREATE TABLE stock_prices (average_price REAL, regression_data TEXT, predicted_stock_price REAL)")
-cursor.execute("INSERT INTO stock_prices (average_price, regression_data, predicted_stock_price) VALUES (?,?,?)", (average_price, regression_data, predicted_stock_price))
-
-# Commit the changes to the database
-conn.commit()
-
-# Close the connection to the database
-conn.close() """
