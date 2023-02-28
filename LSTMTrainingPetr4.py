@@ -1,34 +1,41 @@
 import sys
 import os
-from itertools import chain 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+import itertools
 import tensorflow as tf
+import pandas as pd
+import cupy as cp
+import numpy as np
+import matplotlib.pyplot as plt
+
+import callback as MyCallback
+
+tf.config.run_functions_eagerly(True)
+tf.data.experimental.enable_debug_mode()
+print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
 #from keras.utils import normalize
 #from keras.preprocessing.text import one_hot
 #from keras.utils import to_categorical #one_hot
-##pip install nvidia-cublas-cu11
 
 #print(tf.config.list_physical_devices('GPU'))
 #importing the datase
 #os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
 dataset = pd.read_csv('PETR4Daily.csv')
-training_set = dataset.iloc[:2814,1:2].values #dataset.iloc (iloc não usa gpu)
+training_set = dataset.iloc[:2815,1:2].values #dataset.iloc (iloc não usa gpu)
 training_set_petr4_volume = dataset.iloc[:2814,5:6].values
 
-dataset_dollar = pd.read_csv('USDollar.csv')
+""" dataset_dollar = pd.read_csv('USDollar.csv')
 training_set_dollar = dataset_dollar.iloc[:2814,2:3].values 
 
 dataset_oil = pd.read_csv('crudeOil.csv')
-training_set_oil = dataset_oil.iloc[:2814,2:3].values 
+training_set_oil = dataset_oil.iloc[:2814,2:3].values  """
 
 def make_variables(initializer):
-    return (tf.Variable(initializer(shape=[2812,8], dtype=tf.float64)),
+    return (tf.Variable(initializer(shape=[2812,4], dtype=tf.float64)),
             tf.Variable(initializer(shape=[2812,3], dtype=tf.float64)),
-            tf.Variable(initializer(shape=[2812,8], dtype=tf.float64)))
-X_train, y_train, X_test = make_variables(tf.zeros_initializer())
+            tf.Variable(initializer(shape=[2812,4], dtype=tf.float64)),
+            tf.Variable(initializer(shape=[2815,1], dtype=tf.int32)))
+X_train, y_train, X_test, training_set_scaled = make_variables(tf.zeros_initializer())
 
 #feature scaling
 from sklearn.preprocessing import MinMaxScaler
@@ -36,41 +43,32 @@ from sklearn.preprocessing import StandardScaler
 sc = MinMaxScaler(feature_range = (0,1))
 
 training_set = tf.constant(training_set)
-training_set_scaled = tf.Variable(training_set, dtype=tf.float16)
+#training_set_scaled = tf.Variable(tf.fill(2815),0)
 
-training_set_dollar = tf.constant(training_set_dollar)
+""" training_set_dollar = tf.constant(training_set_dollar)
 training_set_scaled_dollar = tf.Variable(training_set_dollar, dtype=tf.float64)
 
 training_set_oil = tf.constant(training_set_oil)
-training_set_scaled_oil = tf.Variable(training_set_oil, dtype=tf.float64)
+training_set_scaled_oil = tf.Variable(training_set_oil, dtype=tf.float64) """
 
-def heaps_algorithm_tf_subsets(n, k, callback):
-    c = tf.Variable(n, dtype=tf.float16)
-    p = tf.range(k, dtype=tf.int32)
-    callback(p)
-    i = 0
-    while i < k:
-        if c[i] < i:
-            if i % 2 == 0:
-                swap = 0
-            else:
-                swap = c[i]
-            p = tf.tensor_scatter_nd_update(p, [[i], [swap]], [p[swap], p[i]])
-            callback(p)
-            c = tf.tensor_scatter_nd_update(c, [[i]], [c[i] + 1])
-            i = 0
-        else:
-            c = tf.tensor_scatter_nd_update(c, [[i]], [0])
-            i += 1
-        if k < n and i == 0:
-            p = tf.concat([p, [k]])
-            k += 1
-            c = tf.concat([c, [0]])
+def subset_pairs(tensor, subset_size):
+    def pairwise_combinations(subset):
+        pairs = tf.stack(tf.meshgrid(*[subset for _ in range(subset_size)]), axis=-1)
+        pairs = tf.reshape(pairs, (-1, subset_size))
+        return pairs
 
-def print_permutation(perm):
-    print(perm)
+    num_elements = tensor.get_shape().as_list()[0]
+    indices = tf.range(num_elements)
+    combinations = tf.data.Dataset.from_tensor_slices(indices).window(subset_size, shift=1, drop_remainder=True)
+    combinations = combinations.flat_map(lambda window: tf.data.Dataset.zip((window.batch(subset_size),)))
+    pairs = combinations.map(pairwise_combinations).unbatch()
+    return pairs
 
-heaps_algorithm_tf_subsets(training_set_scaled, 2, print_permutation)
+""" tensor = tf.Variable(tf.range(12))
+subset_size = 5
+subsets = subset_pairs(tensor, subset_size)
+for subset in subsets:
+    print("subsets: ",subset.numpy()) """
 
 def cv(x):
     return (tf.math.reduce_std(x)/tf.math.reduce_mean(x))*100
@@ -93,21 +91,51 @@ def normalize(p, n=10, m=100):
     else: 
         return v
 
-for i in range(0, 2813):
+for i in range(0, 2814):
     diff_a = difa(training_set[i,0], training_set[i+1,0])
     p = normalize(diff_a, 10, 800)
 
-    diff_a_dollar = difa(training_set_dollar[i,0], training_set_dollar[i+1,0])
+    """diff_a_dollar = difa(training_set_dollar[i,0], training_set_dollar[i+1,0])
     p_dollar = normalize(diff_a_dollar, 10, 800)
 
     diff_a_oil = difa(training_set_oil[i,0], training_set_oil[i+1,0])
-    p_oil= normalize(diff_a_oil, 10, 800)
-
-    training_set_scaled[i].assign(int(p))
-    training_set_scaled_dollar[i].assign(int(p_dollar))
-    training_set_scaled_oil[i].assign(int(p_oil))
+    p_oil= normalize(diff_a_oil, 10, 800) """
+    if(training_set[i,0] < training_set[i+1,0]):
+        training_set_scaled[i].assign(int(float((str(3)+tf.strings.as_string(p)))))
+    else:
+        training_set_scaled[i].assign(int(float((str(2)+tf.strings.as_string(p)))))
+    """training_set_scaled_dollar[i].assign(int(p_dollar))
+    training_set_scaled_oil[i].assign(int(p_oil)) """
 print("training_set_scaled: ",training_set_scaled)
 
+training_set_scaled = tf.cast(training_set_scaled, dtype=tf.int32)
+def sliding_windows(input_tensor, window_size):
+    num_windows = tf.shape(input_tensor)[0] - window_size + 1
+    indices = tf.range(num_windows)[:, None] + tf.range(window_size)[None, :]
+    mapped = tf.map_fn(lambda x: tf.gather(input_tensor, x), indices, dtype=tf.int32)
+    return tf.squeeze(mapped)
+slind = sliding_windows(training_set_scaled, 3)
+print("slind: ", slind)
+
+v = []
+x = []
+a = 0
+for row in enumerate(slind):
+    print(row)
+    subsets = subset_pairs(tf.constant([row]), 3)
+    for subset in subsets:
+        #print(subset.numpy())
+        #X_train[i].assign(subset)
+        v.append(subset.numpy())
+        print(subset)
+        a +=a
+    x.append(v)
+    print("X: ", x)
+print("FINISHED X: ",x)
+print("v shape: ",v.shape)
+print("x shape: ",x.shape)
+print(tf.convert_to_tensor(x))
+cp.histogram()
 for i in range(0, 2812):
     for x in range(i, i+1):
         d1 = training_set_scaled[tf.size(y_train) - (tf.size(y_train) - x)]
@@ -130,10 +158,10 @@ for i in range(0, 2812):
         X_train[x].assign([
             float(str(1) + tf.as_string(training_set_scaled[x])),
             float(str(1) + tf.as_string(training_set_scaled[x + 1])), 
-            float(training_set_scaled_dollar[x]), 
-            float(training_set_scaled_dollar[x + 1]), 
-            float(training_set_oil[x]), 
-            float(training_set_oil[x + 1]), 
+            #float(training_set_scaled_dollar[x]), 
+            #float(training_set_scaled_dollar[x + 1]), 
+            #float(training_set_oil[x]), 
+            #float(training_set_oil[x + 1]), 
             float(v),
             100+x
             ])
@@ -142,13 +170,14 @@ for i in range(0, 2812):
             #X_train[x].assign([float(v), float(str(1) + tf.as_string(training_set_scaled[x])), float(training_set_scaled_dollar[x + 1]), float(training_set_scaled_dollar[x]), float(str(1) + tf.as_string(training_set_scaled[x+1])), 100+x]) """
         
 
-X_train = tf.reshape(X_train, (X_train.shape[0]//1, 1, 8))
+X_train = tf.reshape(X_train, (X_train.shape[0]//1, 1, 4))
 y_train = tf.reshape(y_train, (y_train.shape[0]//1, 1, 3))
+print("y_train: ", y_train)
+print("X_train: ", X_train)
 
 X_train = tf.cast(X_train, dtype=tf.int32)
 y_train = tf.cast(y_train, dtype=tf.int32)
-print("y_train: ", y_train)
-print("X_train: ", X_train)
+
 
 #building the RNN
 from keras.models import Sequential
@@ -185,18 +214,18 @@ regressor.add(LSTM(units = 30, return_sequences = True))
 #regressor.add(Dropout(0.2))
  """
 #adding the output layer
-regressor.add(Dense(units = 3, activation='softmax')) #sigmoid
+regressor.add(Dense(units = 3, activation='logSoftmax')) #sigmoid
 
 #compiling the RNN
-regressor.compile(optimizer = 'adam', loss = 'categorical_crossentropy')
+regressor.compile(optimizer = tf.optimizers.experimental.SGD(0.01, 0.9, nesterov=True), loss = tf.metrics.categorical_crossentropy, metrics = tf.metrics.categorical_accuracy )
 #categorical_crossentropy
 """ X_train = tf.one_hot(X_train, 3)
 y_train = tf.one_hot(y_train, 3)
 print("to_categorical x_train: ",X_train)
 print("to_categorical y_train: ",y_train) """
 
-tensorboard = tf.keras.callbacks.TensorBoard(log_dir='logs/')
-regressor.fit(X_train, y_train, epochs = 50, batch_size=9, callbacks=[tensorboard], verbose=1) #batch_size 9 -> 9/16 = 192 record
+my_callback = MyCallback(regressor)
+regressor.fit(X_train, y_train, epochs = 50, batch_size=9, callbacks=[my_callback], verbose=1) #batch_size 9 -> 9/16 = 192 record
 print(regressor.metrics_names)
 # evaluate the model
 scores = regressor.evaluate(X_train, y_train, verbose=0)
@@ -231,7 +260,6 @@ print("real stock price: ",real_stock_price)
 print(real_stock_price.shape)
 
 #real_stock_price_scaled = sc.transform(real_stock_price)
-
 
 #visualising the results
 plt.plot(real_stock_price, color = 'red')
